@@ -1,0 +1,63 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Patch config.yaml model settings when ANTHROPIC_API_KEY is set.
+# Uses ruamel.yaml to preserve comments and formatting.
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+CONFIG_FILE="${HERMES_HOME}/config.yaml"
+
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "[01b-fix-model-config] ANTHROPIC_API_KEY not set — skipping"
+    exit 0
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "[01b-fix-model-config] No config.yaml found — skipping"
+    exit 0
+fi
+
+HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes \
+    /opt/hermes/.venv/bin/python -c "
+import os, re
+from pathlib import Path
+
+home = Path(os.environ.get('HERMES_HOME', '/opt/data'))
+cfg = home / 'config.yaml'
+text = cfg.read_text()
+
+# Check current model value using a broad regex (handles quoted or unquoted)
+default_match = re.search(r'^\s*default:\s*[\"\'']?([^\n\"\'#]+?)[\"\'']?\s*$', text, re.MULTILINE)
+if default_match:
+    current = default_match.group(1).strip()
+    print(f'[01b-fix-model-config] Current model: {current!r}')
+    # Only patch if it looks wrong (OpenRouter format or known-bad name)
+    if '/' not in current and '20250715' not in current and current == 'claude-opus-4-5':
+        print('[01b-fix-model-config] Model already set correctly — skipping')
+        exit()
+else:
+    print('[01b-fix-model-config] Could not detect current model — will patch anyway')
+
+# Patch model default (handles quoted and unquoted, any current value)
+text = re.sub(
+    r'^(\s*default:\s*)[\"\'']?[^\n#]+?[\"\'']?(\s*(?:#[^\n]*)?)$',
+    r'\g<1>\"claude-opus-4-6\"\g<2>',
+    text, flags=re.MULTILINE, count=1
+)
+
+# Patch provider (handles quoted and unquoted)
+text = re.sub(
+    r'^(\s*provider:\s*)[\"\'']?[^\n#]+?[\"\'']?(\s*(?:#[^\n]*)?)$',
+    r'\g<1>\"anthropic\"\g<2>',
+    text, flags=re.MULTILINE, count=1
+)
+
+# Remove openrouter base_url line
+text = re.sub(
+    r'^\s*base_url:\s*[\"\'']https://openrouter\.ai[^\n]*[\"\'']?\s*\n',
+    '',
+    text, flags=re.MULTILINE
+)
+
+cfg.write_text(text)
+print('[01b-fix-model-config] config.yaml patched: model=claude-opus-4-6 provider=anthropic')
+"

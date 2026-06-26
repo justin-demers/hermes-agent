@@ -1,0 +1,51 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Auto-mark the default-profile gateway as "running" when a messaging-platform
+# token is present in the environment (Railway / Fly / headless deploys).
+#
+# On servers without an interactive terminal, hermes setup is never run so
+# gateway_state.json is never written, leaving the gateway permanently stopped.
+# This script writes gateway_state=running on first boot so the gateway starts
+# automatically.  load_gateway_config() already auto-wires TELEGRAM_BOT_TOKEN
+# into the Telegram platform, so no manual platform setup is needed.
+#
+# Runs as root (cont-init.d); writes as hermes user via s6-setuidgid.
+# Safe to re-run: no-ops when state is already "running".
+
+HERMES_HOME="${HERMES_HOME:-/opt/data}"
+STATE_FILE="${HERMES_HOME}/gateway_state.json"
+
+# Only proceed if at least one messaging token is set
+if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && [ -z "${SLACK_BOT_TOKEN:-}" ] && [ -z "${DISCORD_BOT_TOKEN:-}" ]; then
+    echo "[03-auto-start-gateway] No messaging tokens found — skipping"
+    exit 0
+fi
+
+# No-op if already running
+if [ -f "$STATE_FILE" ]; then
+    cur=$(s6-setuidgid hermes /opt/hermes/.venv/bin/python \
+        -c "import json; print(json.load(open('$STATE_FILE')).get('gateway_state',''))" 2>/dev/null || true)
+    if [ "$cur" = "running" ]; then
+        echo "[03-auto-start-gateway] gateway_state already running — skipping"
+        exit 0
+    fi
+fi
+
+echo "[03-auto-start-gateway] Setting gateway_state=running in $STATE_FILE"
+
+HERMES_HOME="$HERMES_HOME" s6-setuidgid hermes \
+    /opt/hermes/.venv/bin/python -c "
+import json, os
+from pathlib import Path
+home = Path(os.environ.get('HERMES_HOME', '/opt/data'))
+f = home / 'gateway_state.json'
+d = {}
+if f.exists():
+    try:
+        d = json.loads(f.read_text())
+    except Exception:
+        d = {}
+d['gateway_state'] = 'running'
+f.write_text(json.dumps(d, indent=2) + '\n')
+print('[03-auto-start-gateway] wrote', f)
+"
